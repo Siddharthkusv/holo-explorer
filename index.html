@@ -68,6 +68,8 @@
     <button id="bSnd" title="Sound on/off">SOUND ON</button>
     <button id="bSkel" title="Hand skeleton overlay">SKELETON</button>
     <button id="bMode" title="Switch camera / mouse mode">MOUSE DEMO</button>
+    <button id="bScene" title="Toggle Iron-Man workshop mode">WORKSHOP</button>
+    <button id="bReset" title="Reset workshop" style="display:none">RESET</button>
   </div>
   <div id="toast"></div>
 
@@ -81,7 +83,8 @@
         <span>OPEN PALM</span> &nbsp;→&nbsp; arc reactor spawns in your palm<br>
         <span>PINCH</span> (thumb + index) &nbsp;→&nbsp; grab energy orb, release to throw<br>
         <span>FIST</span> &nbsp;→&nbsp; holographic explosion<br>
-        <span>TWO PALMS</span> &nbsp;→&nbsp; energy beam connects them
+        <span>TWO PALMS</span> &nbsp;→&nbsp; energy beam connects them<br>
+        <span>WORKSHOP</span> → press WORKSHOP (top-right) to assemble an arc reactor part-by-part
       </div><br>
       <button class="bigbtn" id="bCam">ENABLE CAMERA</button>
       <button class="bigbtn ghost" id="bMouse">MOUSE DEMO (no camera)</button>
@@ -142,11 +145,15 @@ const S = {
   mouse: { x: innerWidth/2, y: innerHeight/2, down:false },
   auto: false,           // autopilot demo (?autodemo=1)
   autoT: 0,
+  scene: 'fx',           // 'fx' | 'workshop'
+  build: null,           // workshop state (see initBuild)
   pinched: false,        // pinch state for grab/throw
   grabOrb: null,
   prevPinch: null,
   fistCool: 0,
 };
+// re-scatter workshop parts if the window is resized mid-build
+addEventListener('resize', ()=>{ if(S.scene==='workshop') initBuild(); });
 
 /* ================= AUDIO (tiny synth) ================= */
 let AC = null;
@@ -168,6 +175,9 @@ const sfx = {
   throw(){ blip(400, 1200, 0.3, 'sawtooth', 0.05); },
   boom(){ blip(160, 40, 0.5, 'sine', 0.22); blip(90, 30, 0.6, 'triangle', 0.18); },
   beam(){ blip(200, 600, 0.4, 'sawtooth', 0.03); },
+  acquire(){ blip(500, 950, 0.15, 'sine', 0.08); },
+  lock(){ blip(620, 1240, 0.18, 'square', 0.06); blip(930, 1700, 0.28, 'sine', 0.07); },
+  complete(){ [523,659,784,1047].forEach((f,i)=> setTimeout(()=> blip(f, f*1.25, 0.45, 'sine', 0.10), i*150)); },
 };
 
 /* ================= UI helpers ================= */
@@ -190,6 +200,16 @@ $('bMode').onclick = e => {
   if(S.mode === 'camera'){ stopCamera(); startMouse(false); }
   else { startCamera(); }
 };
+$('bScene').onclick = e => {
+  S.scene = S.scene === 'workshop' ? 'fx' : 'workshop';
+  e.target.textContent = S.scene === 'workshop' ? 'HOLO FX' : 'WORKSHOP';
+  $('bReset').style.display = S.scene === 'workshop' ? '' : 'none';
+  // clear fx leftovers when entering workshop
+  S.grabOrb = null; S.pinched = false; S.orbs = []; S.beams = [];
+  if(S.scene === 'workshop'){ initBuild(); toast('WORKSHOP ONLINE — assemble the arc reactor'); sfx.spawn(); }
+  else toast('HOLO FX MODE');
+};
+$('bReset').onclick = ()=>{ initBuild(); toast('WORKSHOP RESET — parts scattered'); };
 
 /* ================= PARTICLES / ORBS ================= */
 function burst(x, y, n, spd, life){
@@ -420,6 +440,207 @@ function updateActions(){
   }
 }
 
+/* ================= WORKSHOP MODE (Iron-Man builder) ================= */
+function initBuild(){
+  const R = Math.min(W,H), cx = W/2, cy = H/2, s = R*0.052;
+  const defs = [
+    {id:'core',  name:'CORE',       kind:'core',   slot:{x:cx, y:cy}},
+    {id:'coilL', name:'COIL · L',   kind:'coil',   slot:{x:cx-R*0.085, y:cy+R*0.012}},
+    {id:'coilR', name:'COIL · R',   kind:'coil',   slot:{x:cx+R*0.085, y:cy+R*0.012}},
+    {id:'ringI', name:'INNER RING', kind:'ringIn', slot:{x:cx, y:cy}},
+    {id:'ringO', name:'OUTER RING', kind:'ringOut',slot:{x:cx, y:cy}},
+    {id:'cap',   name:'CAP',        kind:'cap',    slot:{x:cx, y:cy-R*0.018}},
+  ];
+  const homes = [
+    {x:W*0.10, y:H*0.20}, {x:W*0.90, y:H*0.20},
+    {x:W*0.08, y:H*0.52}, {x:W*0.92, y:H*0.52},
+    {x:W*0.12, y:H*0.84}, {x:W*0.88, y:H*0.84},
+  ];
+  S.build = {
+    parts: defs.map((d,i)=>({ ...d, x:homes[i].x, y:homes[i].y,
+      size: s*(d.kind==='ringOut'?1.55 : d.kind==='ringIn'?1.2 : 1),
+      placed:false, lockT:0 })),
+    grab:null, hover:null, locked:0, done:false, doneT:0,
+  };
+}
+// unified pointer: pinching hand in camera mode, mouse/touch otherwise
+function activePointer(){
+  if(S.mode === 'camera'){
+    const h = S.hands[0];
+    if(!h) return null;
+    const down = h.gesture === 'pinch' && !!h.pinchPt;
+    const p = (down && h.pinchPt) ? h.pinchPt : h.palm;
+    return { x:p.x, y:p.y, down };
+  }
+  return { x:S.mouse.x, y:S.mouse.y, down:S.mouse.down };
+}
+function updateBuild(){
+  const B = S.build; if(!B || B.done) return;
+  const R = Math.min(W,H), ptr = activePointer();
+  const down = !!(ptr && ptr.down);
+  B.hover = null;
+  if(down){
+    if(!B.grab){
+      let best = null, bd = 1e9;
+      const gr = R*0.10;
+      for(const p of B.parts){
+        if(p.placed) continue;
+        const d = Math.hypot(p.x-ptr.x, p.y-ptr.y);
+        if(d < gr && d < bd){ bd = d; best = p; }
+      }
+      if(best){ B.grab = best; sfx.acquire(); toast('COMPONENT ACQUIRED — ' + best.name); }
+    } else {
+      const g = B.grab;
+      g.x += (ptr.x-g.x)*0.55; g.y += (ptr.y-g.y)*0.55;
+    }
+  } else {
+    if(B.grab){
+      const g = B.grab; B.grab = null;
+      const sr = R*0.13;
+      if(Math.hypot(g.x-g.slot.x, g.y-g.slot.y) < sr){
+        g.placed = true; g.x = g.slot.x; g.y = g.slot.y; g.lockT = 0;
+        B.locked++;
+        flash(g.x, g.y, 95); burst(g.x, g.y, 26, 5, 50);
+        sfx.lock();
+        if(B.locked >= B.parts.length) buildComplete();
+        else toast('COMPONENT LOCKED — ' + B.locked + '/' + B.parts.length);
+      } else toast('COMPONENT RELEASED');
+    } else if(ptr){
+      // hover highlight
+      let best = null, bd = 1e9;
+      const gr = R*0.10;
+      for(const p of B.parts){
+        if(p.placed) continue;
+        const d = Math.hypot(p.x-ptr.x, p.y-ptr.y);
+        if(d < gr && d < bd){ bd = d; best = p; }
+      }
+      B.hover = best;
+    }
+  }
+  for(const p of B.parts) if(p.placed && p.lockT < 60) p.lockT++;
+}
+function buildComplete(){
+  const B = S.build; B.done = true; B.doneT = 0;
+  const cx = W/2, cy = H/2;
+  flash(cx, cy, 280); burst(cx, cy, 130, 9, 95);
+  sfx.complete();
+  toast('ARC REACTOR ONLINE', 4200);
+}
+function drawPartShape(p, t, hot){
+  const s = p.size * (p.placed && p.lockT < 18 ? 1 + Math.sin(p.lockT/18*Math.PI)*0.3 : 1);
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.shadowColor = hot ? '#ffffff' : CYAN; ctx.shadowBlur = hot ? 22 : 13;
+  ctx.strokeStyle = hot ? '#eafcff' : CYAN; ctx.lineWidth = 2.5;
+  if(p.kind === 'core'){
+    ctx.rotate(t*0.8);
+    ctx.beginPath();
+    for(let i=0;i<3;i++){ const a = i*Math.PI*2/3 - Math.PI/2;
+      if(i) ctx.lineTo(Math.cos(a)*s, Math.sin(a)*s); else ctx.moveTo(Math.cos(a)*s, Math.sin(a)*s); }
+    ctx.closePath(); ctx.stroke();
+    glowCircle(0, 0, s*0.5, 'rgba(120,230,255,0.7)', 1);
+  } else if(p.kind === 'coil'){
+    for(let i=-1;i<=1;i++){
+      ctx.beginPath(); ctx.ellipse(0, i*s*0.44, s*0.78, s*0.3, 0, 0, 7); ctx.stroke();
+    }
+    glowCircle(0, 0, s*0.4, 'rgba(255,190,90,0.35)', 1);
+  } else if(p.kind === 'ringIn'){
+    ctx.save(); ctx.rotate(t*0.6); ctx.setLineDash([s*0.4, s*0.25]);
+    ctx.beginPath(); ctx.arc(0, 0, s*0.8, 0, 7); ctx.stroke(); ctx.restore();
+  } else if(p.kind === 'ringOut'){
+    ctx.beginPath(); ctx.arc(0, 0, s, 0, 7); ctx.stroke();
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0, 0, s*0.8, 0, 7); ctx.stroke();
+    ctx.fillStyle = hot ? '#ffffff' : CYAN;
+    for(let i=0;i<8;i++){ const a = i*Math.PI/4 + t*0.4;
+      ctx.beginPath(); ctx.arc(Math.cos(a)*s*0.9, Math.sin(a)*s*0.9, 2.5, 0, 7); ctx.fill(); }
+  } else if(p.kind === 'cap'){
+    ctx.beginPath(); ctx.arc(0, s*0.32, s*0.8, Math.PI, 0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-s*0.8, s*0.32); ctx.lineTo(s*0.8, s*0.32); ctx.stroke();
+    glowCircle(0, -s*0.32, s*0.28, 'rgba(160,240,255,0.8)', 1);
+  }
+  ctx.restore();
+}
+function drawPedestal(t, cx, cy, R){
+  ctx.save();
+  for(let k=0;k<3;k++){
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(t*(0.3+k*0.22)*(k%2 ? -1 : 1));
+    ctx.setLineDash([18, 26]); ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(53,224,255,' + (0.22+k*0.12).toFixed(2) + ')';
+    ctx.beginPath(); ctx.arc(0, 0, R*(0.17+k*0.055), 0, 7); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.setLineDash([]);
+  const bg = ctx.createLinearGradient(0, cy-R*0.32, 0, cy+R*0.06);
+  bg.addColorStop(0, 'rgba(53,224,255,0)'); bg.addColorStop(1, 'rgba(53,224,255,0.16)');
+  ctx.fillStyle = bg;
+  ctx.fillRect(cx-3, cy-R*0.32, 6, R*0.38);
+  ctx.strokeStyle = 'rgba(53,224,255,0.5)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(cx, cy+R*0.03, R*0.21, R*0.05, 0, 0, 7); ctx.stroke();
+  ctx.font = '600 11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(120,210,240,0.75)';
+  ctx.fillText('A S S E M B L Y   P E D E S T A L', cx, cy + R*0.30);
+  ctx.restore();
+}
+function drawWorkshop(t){
+  const B = S.build; if(!B) return;
+  const cx = W/2, cy = H/2, R = Math.min(W,H);
+  drawPedestal(t, cx, cy, R);
+  if(!B.done){
+    // ghost slots for unplaced parts
+    for(const p of B.parts){
+      if(p.placed) continue;
+      ctx.save();
+      ctx.globalAlpha = 0.32; ctx.setLineDash([8, 10]);
+      ctx.strokeStyle = CYAN; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(p.slot.x, p.slot.y, p.size*0.95, 0, 7); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = '600 10px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(160,230,255,0.85)';
+      ctx.fillText(p.name, p.slot.x, p.slot.y + p.size*1.45);
+      ctx.restore();
+    }
+    // parts
+    for(const p of B.parts){
+      const hot = (B.grab === p) || (B.hover === p);
+      drawPartShape(p, t, hot);
+      ctx.save();
+      ctx.font = '600 10px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+      ctx.fillStyle = B.grab === p ? '#ffffff' : 'rgba(160,230,255,0.85)';
+      ctx.fillText((p.placed ? '✓ ' : '') + p.name, p.x, p.y - p.size*1.55);
+      ctx.restore();
+    }
+    // pointer ring
+    const ptr = activePointer();
+    if(ptr){
+      ctx.save();
+      ctx.strokeStyle = 'rgba(53,224,255,0.65)'; ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 8]);
+      ctx.beginPath(); ctx.arc(ptr.x, ptr.y, 15 + Math.sin(t*5)*3, 0, 7); ctx.stroke();
+      ctx.setLineDash([]); ctx.restore();
+    }
+    // progress
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.font = '600 15px "Segoe UI", sans-serif';
+    ctx.fillStyle = '#eafcff'; ctx.shadowColor = CYAN; ctx.shadowBlur = 12;
+    ctx.fillText('ASSEMBLY   ' + B.locked + ' / ' + B.parts.length, cx, H*0.085);
+    ctx.restore();
+  } else {
+    B.doneT++;
+    drawReactor(cx, cy, R*0.15, t);
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.globalAlpha = Math.min(1, B.doneT/30);
+    ctx.font = '200 32px "Segoe UI", sans-serif'; ctx.fillStyle = '#eafcff';
+    ctx.shadowColor = CYAN; ctx.shadowBlur = 24;
+    ctx.fillText('A R C   R E A C T O R   O N L I N E', cx, H*0.15);
+    ctx.font = '400 13px "Segoe UI", sans-serif'; ctx.fillStyle = CYAN_DIM; ctx.shadowBlur = 8;
+    ctx.fillText('MARK I ASSEMBLY COMPLETE', cx, H*0.15 + 30);
+    ctx.restore();
+    if(B.doneT % 20 === 0)
+      burst(cx + (Math.random()-0.5)*R*0.45, cy + (Math.random()-0.5)*R*0.45, 6, 3, 40);
+  }
+}
+
 /* ================= PER-FRAME HAND DETECTION ================= */
 function detectHands(){
   if(S.mode !== 'camera' || !S.landmarker || !S.modelReady) return;
@@ -556,11 +777,13 @@ function drawHUD(t){
   ctx.fillText('MIRROR ON      DEPTH INVERT ON      DIM 40%', W/2, m+26);
   // top-right stats
   ctx.textAlign = 'right'; ctx.fillStyle = CYAN_DIM;
-  ctx.fillText('FPS ' + Math.round(S.fps) + '    HANDS ' + S.hands.length, W-m-8, m+26);
+  ctx.fillText('FPS ' + Math.round(S.fps) + '    HANDS ' + S.hands.length + '    ' + (S.scene==='workshop' ? 'WORKSHOP' : 'HOLO FX'), W-m-8, m+26);
   ctx.fillText(new Date().toLocaleTimeString(), W-m-8, m+44);
   // bottom legend
   ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(207,239,255,0.85)'; ctx.font = '400 12px "Segoe UI", sans-serif';
-  ctx.fillText('OPEN PALM : reactor      PINCH : grab + throw      FIST : detonate      TWO PALMS : beam', W/2, H-m-8);
+  ctx.fillText(S.scene==='workshop'
+    ? 'PINCH / HOLD : grab part      DRAG : move      RELEASE AT PEDESTAL : lock'
+    : 'OPEN PALM : reactor      PINCH : grab + throw      FIST : detonate      TWO PALMS : beam', W/2, H-m-8);
   ctx.restore();
 }
 
@@ -583,6 +806,8 @@ function render(t){
     for(let x=0;x<W;x+=56){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
     for(let y=0;y<H;y+=56){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
   }
+  if(S.scene === 'workshop'){ drawWorkshop(t); }
+  else {
   // hands
   for(const h of S.hands){
     if(S.skeleton) drawSkeleton(h);
@@ -601,6 +826,7 @@ function render(t){
     ctx.restore();
   }
   for(const b of S.beams) drawBeam(b.a, b.b, t);
+  }
   for(const o of S.orbs) drawOrb(o);
   // flashes
   for(const f of S.flashes){
@@ -633,7 +859,7 @@ function loop(now){
   if(S.auto) S.autoT += dt;
   if(S.mode === 'camera') detectHands();
   else S.hands = mouseHands();
-  updateActions();
+  if(S.scene === 'workshop') updateBuild(); else updateActions();
   stepFx(); ambient();
   render(t);
 }
