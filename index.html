@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Holo-Explorer — Hand-Tracking Hologram Console</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#01040c;
+    font-family:"Segoe UI", system-ui, -apple-system, sans-serif; color:#cfefff;
+    -webkit-user-select:none; user-select:none; }
+  #stage { position:fixed; inset:0; touch-action:none; }
+  #cam { position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    transform:scaleX(-1); filter:saturate(1.1); }
+  #fx { position:absolute; inset:0; width:100%; height:100%; }
+  /* CRT scanlines + vignette for the hologram feel */
+  #scan { position:absolute; inset:0; pointer-events:none; z-index:5;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,0.14) 0 1px, transparent 1px 3px);
+    mix-blend-mode:multiply; }
+  #vig { position:absolute; inset:0; pointer-events:none; z-index:5;
+    background:radial-gradient(ellipse at center, transparent 55%, rgba(0,4,12,0.55) 100%); }
+  /* top-right control buttons */
+  #btns { position:absolute; top:14px; right:16px; z-index:20; display:flex; gap:8px; }
+  #btns button { background:rgba(0,40,70,0.55); border:1px solid rgba(0,229,255,0.5);
+    color:#aef3ff; font-size:13px; letter-spacing:1px; padding:8px 12px; border-radius:6px;
+    cursor:pointer; backdrop-filter:blur(4px); transition:all .15s; }
+  #btns button:hover { background:rgba(0,229,255,0.25); box-shadow:0 0 12px rgba(0,229,255,0.5); }
+  #btns button.off { opacity:0.45; }
+  /* start overlay */
+  #start { position:absolute; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(ellipse at center, rgba(2,10,26,0.88) 0%, rgba(1,4,12,0.96) 100%);
+    backdrop-filter:blur(3px); }
+  #start.hidden { display:none; }
+  .panel { text-align:center; max-width:620px; padding:40px 34px; border:1px solid rgba(0,229,255,0.35);
+    border-radius:14px; background:rgba(2,12,28,0.6); box-shadow:0 0 60px rgba(0,229,255,0.12), inset 0 0 40px rgba(0,229,255,0.04); }
+  .panel h1 { font-size:34px; letter-spacing:8px; color:#eafcff; font-weight:200;
+    text-shadow:0 0 24px rgba(0,229,255,0.8); margin-bottom:6px; }
+  .panel h2 { font-size:12px; letter-spacing:4px; color:#5fd7f5; font-weight:400; margin-bottom:22px; }
+  .panel p { font-size:14px; line-height:1.7; color:#9fd8ec; margin-bottom:8px; }
+  .panel p b { color:#eafcff; }
+  .gest { display:inline-block; text-align:left; font-size:13px; color:#8fcbe0; margin:14px 0 20px; line-height:2; }
+  .gest span { color:#35e0ff; font-weight:600; }
+  .bigbtn { display:inline-block; margin:6px; padding:14px 30px; font-size:15px; letter-spacing:2px;
+    color:#02141f; background:linear-gradient(180deg,#6ff0ff,#19b8e6); border:none; border-radius:8px;
+    cursor:pointer; font-weight:700; box-shadow:0 0 26px rgba(0,229,255,0.55); transition:transform .12s; }
+  .bigbtn:hover { transform:scale(1.05); }
+  .bigbtn.ghost { background:transparent; color:#8fe9ff; border:1px solid rgba(0,229,255,0.6); box-shadow:none; font-weight:400; }
+  .tiny { font-size:11px; color:#5b7f93; margin-top:16px; line-height:1.6; }
+  /* error panel */
+  #err { position:absolute; inset:0; z-index:40; display:none; align-items:center; justify-content:center;
+    background:rgba(2,6,16,0.92); }
+  #err.show { display:flex; }
+  #err .panel { border-color:rgba(255,90,90,0.5); box-shadow:0 0 60px rgba(255,60,60,0.12); }
+  #err h1 { color:#ffd7d7; text-shadow:0 0 24px rgba(255,80,80,0.7); font-size:24px; letter-spacing:4px; }
+  #toast { position:absolute; bottom:86px; left:50%; transform:translateX(-50%); z-index:25;
+    background:rgba(0,30,55,0.85); border:1px solid rgba(0,229,255,0.5); color:#d8f6ff;
+    padding:10px 22px; border-radius:20px; font-size:13px; letter-spacing:1px;
+    opacity:0; transition:opacity .3s; pointer-events:none; white-space:nowrap; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" playsinline muted></video>
+  <canvas id="fx"></canvas>
+  <div id="scan"></div>
+  <div id="vig"></div>
+  <div id="btns" style="display:none">
+    <button id="bSnd" title="Sound on/off">SOUND ON</button>
+    <button id="bSkel" title="Hand skeleton overlay">SKELETON</button>
+    <button id="bMode" title="Switch camera / mouse mode">MOUSE DEMO</button>
+  </div>
+  <div id="toast"></div>
+
+  <div id="start">
+    <div class="panel">
+      <h1>HOLO-EXPLORER</h1>
+      <h2>HAND-TRACKING HOLOGRAM CONSOLE</h2>
+      <p>Webcam ke saamne <b>haath dikhao</b> — AI tumhare haath ke 21 points live track karega,<br>
+      aur screen par <b>glowing holograms</b> tumhare ishaaron par nachenge.</p>
+      <div class="gest">
+        <span>OPEN PALM</span> &nbsp;→&nbsp; arc reactor spawns in your palm<br>
+        <span>PINCH</span> (thumb + index) &nbsp;→&nbsp; grab energy orb, release to throw<br>
+        <span>FIST</span> &nbsp;→&nbsp; holographic explosion<br>
+        <span>TWO PALMS</span> &nbsp;→&nbsp; energy beam connects them
+      </div><br>
+      <button class="bigbtn" id="bCam">ENABLE CAMERA</button>
+      <button class="bigbtn ghost" id="bMouse">MOUSE DEMO (no camera)</button>
+      <p class="tiny">Needs Chrome/Edge + webcam + internet (AI model loads from CDN, ~8MB, one time).<br>
+      Nothing is recorded or uploaded — all tracking happens on your device.</p>
+    </div>
+  </div>
+
+  <div id="err">
+    <div class="panel">
+      <h1 id="errTitle">CAMERA BLOCKED</h1>
+      <p id="errMsg">Please allow camera access and try again.</p><br>
+      <button class="bigbtn" id="bRetry">RETRY</button>
+      <button class="bigbtn ghost" id="bErrMouse">USE MOUSE DEMO INSTEAD</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+/* Dynamic import: agar CDN fail ho toh poora page dead na ho — saaf error dikhega */
+let FilesetResolver = null, HandLandmarker = null, MP_ERR = '';
+try{
+  const mp = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs");
+  FilesetResolver = mp.FilesetResolver; HandLandmarker = mp.HandLandmarker;
+}catch(e){ MP_ERR = 'AI hand-tracking code load nahi ho paya (internet ya CDN issue). '; }
+
+/* ================= CONFIG ================= */
+const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+const WASM_URL  = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const CYAN = "#35e0ff", CYAN_DIM = "rgba(53,224,255,0.55)";
+
+/* ================= STATE ================= */
+const video = document.getElementById('cam');
+const canvas = document.getElementById('fx');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0;
+function resize(){ W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+addEventListener('resize', resize); resize();
+
+const S = {
+  mode: 'camera',        // 'camera' | 'mouse'
+  running: false,
+  landmarker: null,
+  modelReady: false,
+  modelLoading: false,
+  hands: [],             // [{palm:{x,y}, scale, gesture, pinchPt, lm (display px), side}]
+  particles: [],
+  orbs: [],
+  flashes: [],
+  beams: [],
+  sound: true,
+  skeleton: false,
+  lastVideoT: -1,
+  fps: 60,
+  frames: 0,
+  statT: 0,
+  toastT: 0,
+  mouse: { x: innerWidth/2, y: innerHeight/2, down:false },
+  auto: false,           // autopilot demo (?autodemo=1)
+  autoT: 0,
+  pinched: false,        // pinch state for grab/throw
+  grabOrb: null,
+  prevPinch: null,
+  fistCool: 0,
+};
+
+/* ================= AUDIO (tiny synth) ================= */
+let AC = null;
+function audio(){ if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ AC=null; } } return AC; }
+function blip(f0, f1, dur, type, vol){
+  if(!S.sound || S.auto) return; const ac = audio(); if(!ac) return;
+  try{
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type||'sine'; o.frequency.setValueAtTime(f0, ac.currentTime);
+    o.frequency.exponentialRampToValueAtTime(Math.max(1,f1), ac.currentTime + dur);
+    g.gain.setValueAtTime(vol||0.12, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + dur);
+    o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + dur + 0.02);
+  }catch(e){}
+}
+const sfx = {
+  spawn(){ blip(300, 900, 0.25, 'sine', 0.10); },
+  grab(){ blip(700, 500, 0.12, 'square', 0.06); },
+  throw(){ blip(400, 1200, 0.3, 'sawtooth', 0.05); },
+  boom(){ blip(160, 40, 0.5, 'sine', 0.22); blip(90, 30, 0.6, 'triangle', 0.18); },
+  beam(){ blip(200, 600, 0.4, 'sawtooth', 0.03); },
+};
+
+/* ================= UI helpers ================= */
+const $ = id => document.getElementById(id);
+let toastTimer = null;
+function toast(msg, ms){
+  const t = $('toast'); t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(toastTimer); toastTimer = setTimeout(()=> t.style.opacity = 0, ms||2200);
+}
+function showErr(title, msg, retryFn){
+  $('errTitle').textContent = title; $('errMsg').innerHTML = msg;
+  $('err').classList.add('show');
+  $('bErrMouse').textContent = ('ontouchstart' in window) ? 'USE TOUCH DEMO INSTEAD' : 'USE MOUSE DEMO INSTEAD';
+  $('bRetry').onclick = ()=>{ $('err').classList.remove('show'); retryFn && retryFn(); };
+}
+$('bErrMouse').onclick = ()=>{ $('err').classList.remove('show'); startMouse(false); };
+$('bSnd').onclick = e => { S.sound = !S.sound; e.target.textContent = S.sound?'SOUND ON':'SOUND OFF'; e.target.classList.toggle('off', !S.sound); };
+$('bSkel').onclick = e => { S.skeleton = !S.skeleton; e.target.classList.toggle('off', !S.skeleton); };
+$('bMode').onclick = e => {
+  if(S.mode === 'camera'){ stopCamera(); startMouse(false); }
+  else { startCamera(); }
+};
+
+/* ================= PARTICLES / ORBS ================= */
+function burst(x, y, n, spd, life){
+  for(let i=0;i<n;i++){
+    const a = Math.random()*Math.PI*2, s = spd*(0.3+Math.random()*0.9);
+    S.particles.push({ x, y, vx:Math.cos(a)*s, vy:Math.sin(a)*s - 1,
+      life:0, max:life*(0.6+Math.random()*0.7), sz:1+Math.random()*3.2,
+      c: Math.random()<0.25 ? '#ffffff' : (Math.random()<0.5 ? CYAN : '#1e90ff') });
+  }
+}
+function flash(x, y, r){ S.flashes.push({x, y, r:10, max:r, life:0}); }
+function ambient(){
+  if(S.particles.length < 90 && Math.random() < 0.25){
+    S.particles.push({ x:Math.random()*W, y:H+10, vx:(Math.random()-0.5)*0.4, vy:-(0.3+Math.random()*0.7),
+      life:0, max:200+Math.random()*200, sz:0.8+Math.random()*1.6, c:'rgba(53,224,255,0.5)', dust:true });
+  }
+}
+function stepFx(){
+  for(const p of S.particles){ p.life++; p.x+=p.vx; p.y+=p.vy; if(!p.dust){ p.vx*=0.985; p.vy=p.vy*0.985+0.06; } }
+  S.particles = S.particles.filter(p => p.life < p.max);
+  for(const o of S.orbs){
+    o.life++; o.trail.push({x:o.x, y:o.y}); if(o.trail.length > 22) o.trail.shift();
+    o.x += o.vx; o.y += o.vy; o.vx *= 0.985; o.vy *= 0.985;
+    if(Math.random()<0.5) S.particles.push({x:o.x+(Math.random()-0.5)*8, y:o.y+(Math.random()-0.5)*8,
+      vx:0, vy:0, life:0, max:24, sz:1.5, c:CYAN});
+  }
+  S.orbs = S.orbs.filter(o => o.life < 150 && o.x>-60 && o.x<W+60 && o.y>-60 && o.y<H+60);
+  for(const f of S.flashes) f.life++;
+  S.flashes = S.flashes.filter(f => f.life < 22);
+}
+
+/* ================= HAND MATH ================= */
+const CONN = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+              [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const d2 = (a,b)=> Math.hypot(a.x-b.x, a.y-b.y);
+function smooth(pt, prev, a){ return prev ? {x:prev.x+(pt.x-prev.x)*a, y:prev.y+(pt.y-prev.y)*a} : pt; }
+
+function classify(lm){
+  // lm: 21 normalized landmarks {x,y}
+  const ext = i => { const tip=[8,12,16,20][i], pip=[6,10,14,18][i]; return lm[tip].y < lm[pip].y - 0.015; };
+  const fingers = [ext(0),ext(1),ext(2),ext(3)];
+  const n = fingers.filter(Boolean).length;
+  const scale = d2(lm[0], lm[9]) || 0.2;
+  const pinchD = d2(lm[4], lm[8]) / scale;
+  const pinch = pinchD < 0.5;
+  let g = 'other';
+  if(n === 4) g = 'open';
+  else if(n === 0) g = 'fist';
+  else if(n === 1 && fingers[0]) g = 'point';
+  if(pinch && (g==='open' || g==='point' || g==='other')) g = 'pinch';
+  return { g, pinchD, scale };
+}
+
+// EMA smoothing per hand slot to kill jitter
+const smoothSlots = [{}, {}];
+function toDisplay(lm){
+  // mirror x for display
+  return lm.map(p => ({ x:(1-p.x)*W, y:p.y*H }));
+}
+
+/* ================= MODEL ================= */
+async function ensureModel(){
+  if(S.landmarker || S.modelLoading) return;
+  S.modelLoading = true;
+  try{
+    const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+    const mk = async (delegate) => await HandLandmarker.createFromOptions(vision, {
+      baseOptions:{ modelAssetPath: MODEL_URL, delegate },
+      runningMode:"VIDEO", numHands:2,
+      minHandDetectionConfidence:0.5, minHandPresenceConfidence:0.5, minTrackingConfidence:0.5,
+    });
+    try{ S.landmarker = await mk("GPU"); }
+    catch(e){ S.landmarker = await mk("CPU"); }  // fallback for weak GPUs
+    S.modelReady = true;
+  }catch(e){
+    S.modelLoading = false;
+    throw e;
+  }
+  S.modelLoading = false;
+}
+
+/* ================= CAMERA MODE ================= */
+let stream = null;
+async function startCamera(){
+  $('start').classList.add('hidden'); $('err').classList.remove('show');
+  S.mode = 'camera'; S.auto = false;
+  $('bMode').textContent = 'MOUSE DEMO';
+  if(!window.isSecureContext){
+    showErr('Camera blocked — galat tareeke se khola',
+      'Ye file <b>file manager / WhatsApp viewer (content://)</b> se khuli hai — yahan Chrome camera deta hi nahi. <b>HTTPS link</b> se kholo (Kashfi se naya link lo) — ya neeche wala button dabao, usme camera chahiye hi nahi.');
+    setStatus('CAMERA','blocked'); return;
+  }
+  if(MP_ERR || !HandLandmarker){
+    showErr('AI load nahi hua', MP_ERR + 'Internet ON karke page reload karo — ya neeche wala button dabao.');
+    setStatus('AI','load fail'); return;
+  }
+  try{
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+      throw new Error('Camera API not available. Open this file in Chrome/Edge (https or localhost).');
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{ width:{ideal:1280}, height:{ideal:720}, facingMode:"user" }, audio:false });
+    video.srcObject = stream;
+    await video.play().catch(()=>{});
+    toast('LOADING AI HAND MODEL…');
+    await ensureModel();
+    beginRun();
+    toast('HAND TRACKING LIVE — show your palm');
+  }catch(e){
+    console.error(e);
+    const msg = (e && e.name === 'NotAllowedError')
+      ? 'Camera permission <b>denied</b>. Click the camera icon in the address bar to allow it, then Retry — or use Mouse Demo (no camera needed).'
+      : 'Could not start camera / AI model: <b>'+String((e&&e.message)||e).slice(0,160)+'</b>';
+    showErr('CAMERA / AI FAILED', msg, startCamera);
+  }
+}
+function stopCamera(){
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+  video.srcObject = null; S.hands = [];
+}
+
+/* ================= MOUSE MODE (+ autopilot for testing) ================= */
+function startMouse(auto){
+  $('start').classList.add('hidden'); $('err').classList.remove('show');
+  stopCamera();
+  S.mode = 'mouse'; S.auto = !!auto; S.autoT = 0;
+  $('bMode').textContent = 'USE CAMERA';
+  beginRun();
+  if(!auto) toast(('ontouchstart' in window)
+    ? 'TOUCH DEMO — drag = palm, hold = pinch, double-tap = blast'
+    : 'MOUSE DEMO — move mouse = palm, hold click = pinch, SPACE = blast');
+}
+addEventListener('mousemove', e => { S.mouse.x = e.clientX; S.mouse.y = e.clientY; });
+addEventListener('mousedown', e => { if(e.target.closest && e.target.closest('button')) return; if(S.mode==='mouse' && !S.auto && e.button===0) S.mouse.down = true; });
+addEventListener('mouseup',   e => { if(e.button===0) S.mouse.down = false; });
+addEventListener('keydown', e => {
+  if(S.mode==='mouse' && !S.auto && (e.code==='Space')){
+    e.preventDefault(); doExplosion(S.mouse.x, S.mouse.y, 90);
+  }
+});
+addEventListener('contextmenu', e => {
+  if(S.mode==='mouse' && !S.auto){ e.preventDefault(); doExplosion(S.mouse.x, S.mouse.y, 90); }
+});
+/* touch support for phones/tablets */
+let lastTap = 0;
+function touchPos(e){ const t = e.touches[0]; S.mouse.x = t.clientX; S.mouse.y = t.clientY; }
+addEventListener('touchstart', e => {
+  if(e.target.closest && e.target.closest('button')) return;
+  if(S.mode!=='mouse' || S.auto) return;
+  touchPos(e); S.mouse.down = true;
+  const n = performance.now();
+  if(n - lastTap < 330) doExplosion(S.mouse.x, S.mouse.y, 90);
+  lastTap = n;
+  if(e.cancelable) e.preventDefault();
+}, {passive:false});
+addEventListener('touchmove', e => {
+  if(S.mode!=='mouse' || S.auto) return;
+  touchPos(e);
+  if(e.cancelable) e.preventDefault();
+}, {passive:false});
+addEventListener('touchend', e => { S.mouse.down = false; });
+
+/* autopilot: cycles gestures so every effect can be verified headless */
+function autoHands(t){
+  const cx = W/2, cy = H/2, R = Math.min(W,H);
+  const cyc = (t % 14);
+  const hands = [];
+  const L = (a)=>({ x: cx + Math.cos(a)*R*0.28, y: cy + Math.sin(a*1.3)*R*0.2 });
+  if(cyc < 4){           // single open palm roaming
+    const p = L(t*0.9); hands.push(mkVH(p.x, p.y, 'open'));
+  } else if(cyc < 7){    // pinch roam (orb follows), then release handled by transition
+    const p = L(t*1.1); hands.push(mkVH(p.x, p.y, 'pinch'));
+  } else if(cyc < 9){    // open again (released orb flies)
+    const p = L(t*0.9); hands.push(mkVH(p.x, p.y, 'open'));
+  } else if(cyc < 11){   // two palms -> beam
+    hands.push(mkVH(cx - R*0.22, cy + Math.sin(t*2)*30, 'open'));
+    hands.push(mkVH(cx + R*0.22, cy - Math.sin(t*2)*30, 'open'));
+  } else {               // fist -> explosion (cooldown-gated)
+    const p = L(t*0.5); hands.push(mkVH(p.x, p.y, 'fist'));
+  }
+  return hands;
+}
+function mkVH(x, y, gesture){
+  const s = Math.min(W,H)*0.09;
+  const px = gesture==='pinch' ? {x:x+s*0.15, y:y-s*0.3} : null;
+  return { palm:{x,y}, scale:s, gesture, pinchPt:px, lm:null, side:'auto' };
+}
+function mouseHands(){
+  if(S.auto) return autoHands(S.autoT);
+  const g = S.mouse.down ? 'pinch' : 'open';
+  return [mkVH(S.mouse.x, S.mouse.y, g)];
+}
+
+/* ================= GESTURE ACTIONS ================= */
+function doExplosion(x, y, power){
+  burst(x, y, 70, power/10, 70); flash(x, y, power*2.4);
+  sfx.boom(); toast('HOLOGRAM DISPERSED');
+}
+function updateActions(){
+  // pinch grab / throw (use first pinching hand)
+  const ph = S.hands.find(h => h.gesture === 'pinch' && h.pinchPt);
+  if(ph){
+    if(!S.pinched){
+      S.pinched = true; S.grabOrb = { x:ph.pinchPt.x, y:ph.pinchPt.y, vx:0, vy:0, life:0, trail:[] };
+      sfx.grab();
+    } else if(S.grabOrb){
+      const o = S.grabOrb;
+      o.vx = (ph.pinchPt.x - o.x)*0.6; o.vy = (ph.pinchPt.y - o.y)*0.6;
+      o.x = ph.pinchPt.x; o.y = ph.pinchPt.y; o.life = 0;
+      o.trail.push({x:o.x, y:o.y}); if(o.trail.length>22) o.trail.shift();
+    }
+    S.prevPinch = { x:ph.pinchPt.x, y:ph.pinchPt.y };
+  } else if(S.pinched){
+    // released -> throw
+    S.pinched = false;
+    if(S.grabOrb){ S.orbs.push(S.grabOrb); sfx.throw(); }
+    S.grabOrb = null;
+  }
+  // fist -> explosion (cooldown 1.2s)
+  if(S.fistCool > 0) S.fistCool--;
+  const fh = S.hands.find(h => h.gesture === 'fist');
+  if(fh && S.fistCool === 0){ S.fistCool = 72; doExplosion(fh.palm.x, fh.palm.y, fh.scale*2.2); }
+  // two open palms -> beam
+  S.beams = [];
+  const opens = S.hands.filter(h => h.gesture === 'open');
+  if(opens.length >= 2){
+    S.beams.push({ a:opens[0].palm, b:opens[1].palm });
+    if(Math.random()<0.3) sfx.beam();
+  }
+}
+
+/* ================= PER-FRAME HAND DETECTION ================= */
+function detectHands(){
+  if(S.mode !== 'camera' || !S.landmarker || !S.modelReady) return;
+  if(video.readyState < 2 || video.currentTime === S.lastVideoT) return;
+  S.lastVideoT = video.currentTime;
+  let res = null;
+  try{ res = S.landmarker.detectForVideo(video, performance.now()); }
+  catch(e){ return; }
+  const out = [];
+  if(res && res.landmarks){
+    for(let i=0;i<res.landmarks.length;i++){
+      const lm = res.landmarks[i];
+      const px = toDisplay(lm);
+      const cls = classify(lm);
+      const palmIdx = [0,5,9,13,17];
+      let palm = {x:0,y:0}; palmIdx.forEach(k=>{ palm.x+=px[k].x; palm.y+=px[k].y; });
+      palm.x/=5; palm.y/=5;
+      const slot = smoothSlots[i] || (smoothSlots[i] = {});
+      slot.palm = smooth(palm, slot.palm, 0.55);
+      const scale = d2(px[0], px[9]);
+      let pinchPt = null;
+      if(cls.g === 'pinch'){
+        const raw = { x:(px[4].x+px[8].x)/2, y:(px[4].y+px[8].y)/2 };
+        slot.pinch = smooth(raw, slot.pinch, 0.6); pinchPt = slot.pinch;
+      } else slot.pinch = null;
+      out.push({ palm:slot.palm, scale, gesture:cls.g, pinchPt, lm:px,
+                 side:(res.handedness && res.handedness[i] && res.handedness[i][0]) ? res.handedness[i][0].categoryName : '' });
+    }
+  }
+  S.hands = out;
+}
+
+/* ================= RENDER ================= */
+function glowCircle(x, y, r, color, alpha){
+  const g = ctx.createRadialGradient(x,y,0,x,y,r);
+  g.addColorStop(0, color); g.addColorStop(1, 'rgba(0,20,40,0)');
+  ctx.globalAlpha = alpha; ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill(); ctx.globalAlpha = 1;
+}
+function drawReactor(x, y, R, t){
+  ctx.save();
+  ctx.shadowColor = CYAN; ctx.shadowBlur = 24;
+  glowCircle(x, y, R*2.3, 'rgba(0,180,255,0.30)', 1);
+  // outer ring
+  ctx.strokeStyle = CYAN; ctx.lineWidth = Math.max(2, R*0.07);
+  ctx.beginPath(); ctx.arc(x,y,R,0,7); ctx.stroke();
+  // rotating dashed rings
+  for(let k=0;k<2;k++){
+    ctx.save(); ctx.translate(x,y); ctx.rotate(t*(k? -0.9:0.7) + k*2);
+    ctx.setLineDash([R*0.32, R*0.22]); ctx.lineWidth = Math.max(2,R*0.05);
+    ctx.strokeStyle = k? 'rgba(160,240,255,0.85)' : CYAN_DIM;
+    ctx.beginPath(); ctx.arc(0,0,R*0.78,0,7); ctx.stroke(); ctx.restore();
+  }
+  ctx.setLineDash([]);
+  // 10 arc-reactor wedges
+  ctx.save(); ctx.translate(x,y); ctx.rotate(t*0.5);
+  ctx.fillStyle = 'rgba(120,230,255,0.9)';
+  for(let i=0;i<10;i++){
+    ctx.rotate(Math.PI*2/10);
+    ctx.beginPath(); ctx.moveTo(0,-R*0.62);
+    ctx.lineTo(R*0.10,-R*0.52); ctx.lineTo(R*0.10,-R*0.30); ctx.lineTo(0,-R*0.40);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+  // pulsing core
+  const pulse = 1 + Math.sin(t*6)*0.09;
+  const cg = ctx.createRadialGradient(x,y,0,x,y,R*0.34*pulse);
+  cg.addColorStop(0,'#ffffff'); cg.addColorStop(0.55,'#aef4ff'); cg.addColorStop(1,'rgba(0,150,220,0)');
+  ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x,y,R*0.34*pulse,0,7); ctx.fill();
+  // orbiting sparks
+  for(let i=0;i<6;i++){
+    const a = t*2.2 + i*Math.PI/3, ox = x+Math.cos(a)*R*1.18, oy = y+Math.sin(a)*R*1.18;
+    glowCircle(ox, oy, R*0.16, 'rgba(120,230,255,0.8)', 0.9);
+  }
+  ctx.restore();
+}
+function drawOrb(o){
+  ctx.save(); ctx.shadowColor = CYAN; ctx.shadowBlur = 18;
+  for(let i=0;i<o.trail.length;i++){
+    const p = o.trail[i], k = i/o.trail.length;
+    ctx.globalAlpha = k*0.5; ctx.fillStyle = CYAN;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 2+k*7, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  glowCircle(o.x, o.y, 26, 'rgba(0,200,255,0.5)', 1);
+  const g = ctx.createRadialGradient(o.x,o.y,0,o.x,o.y,13);
+  g.addColorStop(0,'#ffffff'); g.addColorStop(0.6,'#7df0ff'); g.addColorStop(1,'rgba(0,140,210,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(o.x,o.y,13,0,7); ctx.fill();
+  ctx.restore();
+}
+function drawBeam(a, b, t){
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  const grad = ctx.createLinearGradient(a.x,a.y,b.x,b.y);
+  grad.addColorStop(0,'rgba(0,229,255,0)'); grad.addColorStop(0.5,'rgba(160,245,255,0.85)'); grad.addColorStop(1,'rgba(0,229,255,0)');
+  ctx.strokeStyle = grad; ctx.lineWidth = 10; ctx.shadowColor = CYAN; ctx.shadowBlur = 22;
+  ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2.5; ctx.shadowBlur = 0;
+  ctx.setLineDash([26,34]); ctx.lineDashOffset = -t*220;
+  ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  ctx.setLineDash([]);
+  for(let i=0;i<8;i++){
+    const k = Math.random();
+    S.particles.push({ x:a.x+(b.x-a.x)*k, y:a.y+(b.y-a.y)*k,
+      vx:(Math.random()-0.5)*2, vy:(Math.random()-0.5)*2, life:0, max:26, sz:1.8, c:'#bff4ff' });
+  }
+  ctx.restore();
+}
+function drawSkeleton(h){
+  if(!h.lm) return;
+  ctx.save(); ctx.strokeStyle = 'rgba(53,224,255,0.4)'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for(const [a,b] of CONN){ ctx.moveTo(h.lm[a].x,h.lm[a].y); ctx.lineTo(h.lm[b].x,h.lm[b].y); }
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(180,245,255,0.85)';
+  for(const p of h.lm){ ctx.beginPath(); ctx.arc(p.x,p.y,3,0,7); ctx.fill(); }
+  ctx.restore();
+}
+function drawHUD(t){
+  ctx.save();
+  ctx.font = '600 13px "Segoe UI", sans-serif';
+  // corner brackets
+  ctx.strokeStyle = 'rgba(53,224,255,0.7)'; ctx.lineWidth = 2;
+  const m = 18, L = 34;
+  for(const [x,y,dx,dy] of [[m,m,1,1],[W-m,m,-1,1],[m,H-m,1,-1],[W-m,H-m,-1,-1]]){
+    ctx.beginPath(); ctx.moveTo(x+dx*L,y); ctx.lineTo(x,y); ctx.lineTo(x,y+dy*L); ctx.stroke();
+  }
+  // top-left title
+  ctx.fillStyle = '#eafcff'; ctx.font = '200 20px "Segoe UI", sans-serif';
+  ctx.fillText('H O L O - E X P L O R E R', m+8, m+26);
+  ctx.font = '400 11px "Segoe UI", sans-serif'; ctx.fillStyle = CYAN_DIM;
+  ctx.fillText(S.mode==='camera' ? 'LIVE HAND TRACKING // AI ON-DEVICE' : 'MOUSE SIMULATION MODE', m+8, m+44);
+  // top-center toggles (reel style)
+  ctx.textAlign = 'center'; ctx.fillStyle = '#cfefff'; ctx.font = '600 12px "Segoe UI", sans-serif';
+  ctx.fillText('MIRROR ON      DEPTH INVERT ON      DIM 40%', W/2, m+26);
+  // top-right stats
+  ctx.textAlign = 'right'; ctx.fillStyle = CYAN_DIM;
+  ctx.fillText('FPS ' + Math.round(S.fps) + '    HANDS ' + S.hands.length, W-m-8, m+26);
+  ctx.fillText(new Date().toLocaleTimeString(), W-m-8, m+44);
+  // bottom legend
+  ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(207,239,255,0.85)'; ctx.font = '400 12px "Segoe UI", sans-serif';
+  ctx.fillText('OPEN PALM : reactor      PINCH : grab + throw      FIST : detonate      TWO PALMS : beam', W/2, H-m-8);
+  ctx.restore();
+}
+
+function render(t){
+  ctx.clearRect(0,0,W,H);
+  // video background (mirrored via CSS on <video>; draw frame manually for canvas control)
+  if(S.mode === 'camera' && video.readyState >= 2){
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const s = Math.max(W/vw, H/vh), dw = vw*s, dh = vh*s;
+    ctx.save(); ctx.translate(W,0); ctx.scale(-1,1);
+    ctx.drawImage(video, (W-dw)/2, (H-dh)/2, dw, dh);
+    ctx.restore();
+    ctx.fillStyle = 'rgba(2,8,22,0.38)'; ctx.fillRect(0,0,W,H); // DIM 40%
+  } else {
+    // mouse mode backdrop: deep grid
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#020816'); g.addColorStop(1,'#01040c');
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    ctx.strokeStyle = 'rgba(53,224,255,0.07)'; ctx.lineWidth = 1;
+    for(let x=0;x<W;x+=56){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+    for(let y=0;y<H;y+=56){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+  }
+  // hands
+  for(const h of S.hands){
+    if(S.skeleton) drawSkeleton(h);
+    if(h.gesture === 'open') drawReactor(h.palm.x, h.palm.y, h.scale*0.85, t);
+    if(h.gesture === 'point'){
+      drawReactor(h.palm.x, h.palm.y, h.scale*0.5, t);
+      ctx.save(); ctx.strokeStyle = CYAN; ctx.lineWidth = 3; ctx.shadowColor = CYAN; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(h.palm.x, h.palm.y, h.scale*1.5, 0, 7); ctx.stroke(); ctx.restore();
+    }
+    if(h.gesture === 'pinch' && S.grabOrb) drawOrb(S.grabOrb);
+    // label
+    ctx.save(); ctx.font = '600 11px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(190,245,255,0.9)';
+    const lbl = {open:'REACTOR ONLINE', pinch:'ORB CAPTURED', fist:'DETONATE', point:'FOCUS', other:'TRACKING'}[h.gesture] || 'TRACKING';
+    ctx.fillText(lbl, h.palm.x, h.palm.y - h.scale*1.7);
+    ctx.restore();
+  }
+  for(const b of S.beams) drawBeam(b.a, b.b, t);
+  for(const o of S.orbs) drawOrb(o);
+  // flashes
+  for(const f of S.flashes){
+    const k = f.life/22, r = f.r*(0.3+k);
+    ctx.save(); ctx.globalAlpha = 1-k;
+    const g = ctx.createRadialGradient(f.x,f.y,0,f.x,f.y,r);
+    g.addColorStop(0,'rgba(255,255,255,0.9)'); g.addColorStop(0.4,'rgba(120,230,255,0.5)'); g.addColorStop(1,'rgba(0,120,200,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(f.x,f.y,r,0,7); ctx.fill(); ctx.restore();
+  }
+  // particles
+  ctx.save();
+  for(const p of S.particles){
+    const k = 1 - p.life/p.max;
+    ctx.globalAlpha = Math.max(0,k) * (p.dust?0.6:1);
+    ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.sz,0,7); ctx.fill();
+  }
+  ctx.restore(); ctx.globalAlpha = 1;
+  drawHUD(t);
+}
+
+/* ================= MAIN LOOP ================= */
+let lastT = performance.now();
+function loop(now){
+  if(!S.running) return;
+  requestAnimationFrame(loop);
+  const dt = Math.min(0.1, (now-lastT)/1000); lastT = now;
+  S.fps += ((1/Math.max(dt,1e-4)) - S.fps)*0.05;
+  const t = now/1000;
+  if(S.auto) S.autoT += dt;
+  if(S.mode === 'camera') detectHands();
+  else S.hands = mouseHands();
+  updateActions();
+  stepFx(); ambient();
+  render(t);
+}
+function beginRun(){
+  if(S.running) return;
+  S.running = true; $('btns').style.display = 'flex';
+  lastT = performance.now();
+  requestAnimationFrame(loop);
+}
+
+/* ================= WIRE UP ================= */
+$('bCam').onclick = ()=>{ audio(); startCamera(); };
+$('bMouse').onclick = ()=>{ audio(); startMouse(false); };
+
+// autostart params (used by automated tests): ?autostart=camera | ?autodemo=1
+(function(){
+  const q = new URLSearchParams(location.search);
+  if(q.get('autodemo') === '1'){ startMouse(true); }
+  else if(q.get('autostart') === 'camera'){ startCamera(); }
+})();
+</script>
+</body>
+</html>
